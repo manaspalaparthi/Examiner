@@ -1,0 +1,10 @@
+deepagents>=0.0.5
+langgraph>=0.2.55
+langchain-core>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-ollama>=0.2.0
+python-dotenv>=1.0.0
+pip>=26.1
+
+[dev]
+langgraph-cli[inmem]>=0.1.55

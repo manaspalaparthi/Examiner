@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "examiner": "examiner.agent:agent"
+  },
+  "env": ".env"
+}
