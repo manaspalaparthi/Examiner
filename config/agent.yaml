@@ -1,0 +1,35 @@
+agent_id: default
+system_prompt: |
+  You are a helpful, concise voice-style assistant. Keep replies short and
+  conversational. Use tools only when needed. Do not fabricate tool results.
+  When a tool is slow, give a short progress update rather than waiting silently.
+provider: gemini
+model: gemma-4-31b-it
+temperature: 0.3
+max_tokens: 1024
+history_limit: 30
+tool_groups: []
+
+ack:
+  enabled: false
+  phrases:
+    - "Sure, I'll check that."
+    - "Got it, let me look into it."
+    - "Understood, I'll work through that."
+    - "Okay, looking at that now."
+
+mcp_servers: []
+
+subagents:
+  enabled: true
+  max_children: 4
+  max_iters: 4
+  timeout_s: 45
+
+timeouts:
+  tool_s: 10
+  mcp_s: 10
+  llm_first_token_s: 8
+
+tracing:
+  enabled: true

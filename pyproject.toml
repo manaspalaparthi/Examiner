@@ -15,10 +15,42 @@ dependencies = [
     "langchain-ollama>=0.2.0",
     "python-dotenv>=1.0.0",
     "pip>=26.1",
+    "asyncpg>=0.31.0",
+    "fastapi[standard]>=0.136.1",
+    "numpy>=2.4.4",
 ]
 
 [project.optional-dependencies]
-dev = ["langgraph-cli[inmem]>=0.1.55"]
+dev = ["langgraph-cli[inmem]>=0.1.55", "pytest>=8.0", "pytest-asyncio>=0.23"]
+voice = [
+    "fastapi>=0.115",
+    "starlette<1.0",
+    "uvicorn[standard]>=0.30",
+    "websockets>=13",
+    "silero-vad>=5.1",
+    "kokoro-onnx>=0.4",
+    "numpy>=1.26",
+    "soundfile>=0.12",
+    "langgraph-sdk>=0.1.55",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "parakeet-mlx>=0.2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "nemo-toolkit[asr]>=2.0; sys_platform != 'darwin'",
+]
+voice-tester = ["sounddevice>=0.4"]
+agent = [
+    "google-genai>=1.0",
+    "httpx>=0.27",
+    "asyncpg>=0.30",
+    "mcp>=1.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
