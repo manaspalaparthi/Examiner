@@ -1,1 +1,51 @@
+# Secrets and local environment
 .env
+.env.*
+!.env.example
+
+# Local runtime state
+.langgraph_api/
+*.pckl
+*.pickle
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+.swc/
+.turbo/
+out/
+coverage/
+*.tsbuildinfo
+
+# Generated model/audio artifacts
+*.onnx
+*.bin
+*.wav
+*.mp3
+*.flac
+
+# Tooling and OS noise
+.DS_Store
+.claude/
+.vscode/
+.idea/
