@@ -79,25 +79,12 @@ class GeminiClient(LLMClient):
             )
 
         contents = _to_gemini_contents(messages)
-        try:
-            response = await self._client.aio.models.generate_content_stream(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
-        except Exception as e:
-            if "thinking_config" in config_kwargs and _is_unsupported_thinking_error(e):
-                config_kwargs.pop("thinking_config", None)
-                try:
-                    response = await self._client.aio.models.generate_content_stream(
-                        model=model,
-                        contents=contents,
-                        config=types.GenerateContentConfig(**config_kwargs),
-                    )
-                except Exception as retry_e:
-                    raise ProviderError(f"gemini request failed: {retry_e}") from retry_e
-            else:
-                raise ProviderError(f"gemini request failed: {e}") from e
+        response = await self._open_stream(
+            model=model,
+            contents=contents,
+            config_kwargs=config_kwargs,
+            thinking_enabled=thinking_enabled,
+        )
 
         any_tool_call = False
         try:
@@ -132,6 +119,57 @@ class GeminiClient(LLMClient):
 
         yield LLMFinish(reason="tool_calls" if any_tool_call else "stop")
 
+    async def _open_stream(
+        self,
+        *,
+        model: str,
+        contents: list[dict[str, Any]],
+        config_kwargs: dict[str, Any],
+        thinking_enabled: bool,
+    ) -> Any:
+        types = self._types
+        try:
+            return await self._client.aio.models.generate_content_stream(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+        except Exception as e:
+            retry_config = dict(config_kwargs)
+            if "thinking_config" in retry_config and _is_unsupported_thinking_error(e):
+                retry_config.pop("thinking_config", None)
+                try:
+                    return await self._client.aio.models.generate_content_stream(
+                        model=model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**retry_config),
+                    )
+                except Exception as retry_e:
+                    e = retry_e
+
+            fallback = _fallback_model(model)
+            if fallback:
+                log.warning("gemini model %s failed; retrying with %s: %s", model, fallback, e)
+                fallback_config = dict(retry_config)
+                thinking_config = getattr(types, "ThinkingConfig", None)
+                if thinking_config is not None and "thinking_config" in config_kwargs:
+                    fallback_config["thinking_config"] = _thinking_config(
+                        thinking_config,
+                        model=fallback,
+                        enabled=thinking_enabled,
+                    )
+                try:
+                    return await self._client.aio.models.generate_content_stream(
+                        model=fallback,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**fallback_config),
+                    )
+                except Exception as fallback_e:
+                    raise ProviderError(
+                        f"gemini request failed on {model} and fallback {fallback}: {fallback_e}"
+                    ) from fallback_e
+            raise ProviderError(f"gemini request failed: {e}") from e
+
 
 def _is_thought_part(part: Any) -> bool:
     """Gemini marks non-user-facing reasoning parts with ``thought=True``."""
@@ -162,6 +200,17 @@ def _thinking_config(thinking_config: Any, *, model: str, enabled: bool) -> Any:
 def _uses_thinking_level(model: str) -> bool:
     normalized = model.lower()
     return normalized.startswith(("gemini-3", "gemma-4"))
+
+
+def _fallback_model(model: str) -> str | None:
+    configured = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash").strip()
+    if not configured:
+        return None
+    if model == configured:
+        return None
+    if model.lower() == "gemma-4-31b-it":
+        return configured
+    return None
 
 
 def _first_supported_thinking_config(thinking_config: Any, attempts: list[dict[str, Any]]) -> Any:

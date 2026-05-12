@@ -26,7 +26,7 @@ import { ADMIN_USER } from "@/lib/auth";
 import type { AgentStatus } from "@/lib/types";
 
 const MODELS = [
-  { id: "gemma-4-31b-it", label: "Gemini · Gemma 4 31B" },
+  { id: "gemini-2.5-flash", label: "Gemini · 2.5 Flash" },
   { id: "gemini-2.0-flash", label: "Gemini · 2.0 Flash" },
   { id: "llama3.1", label: "Ollama · Llama 3.1" },
   { id: "qwen2.5", label: "Ollama · Qwen 2.5" },

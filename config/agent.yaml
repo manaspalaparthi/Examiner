@@ -4,7 +4,7 @@ system_prompt: |
   conversational. Use tools only when needed. Do not fabricate tool results.
   When a tool is slow, give a short progress update rather than waiting silently.
 provider: gemini
-model: gemma-4-31b-it
+model: gemini-2.5-flash
 temperature: 0.3
 max_tokens: 1024
 history_limit: 30
