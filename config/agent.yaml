@@ -33,3 +33,62 @@ timeouts:
 
 tracing:
   enabled: true
+
+voice:
+  transport: livekit
+
+  # Local-first defaults: LiveKit handles rooms, WebRTC, turn timing, and
+  # interruption flow while the current local models/runtime do the work.
+  stt:
+    provider: local
+    model_id:
+    model:
+    language: en
+    options: {}
+
+  llm:
+    provider: runtime
+    model:
+    options: {}
+
+  tts:
+    provider: local
+    model:
+    model_path: kokoro-v1.0.onnx
+    voices_path: voices-v1.0.bin
+    voice: af_heart
+    speed: 1.0
+    lang: en-us
+    options: {}
+
+  # For managed low-latency models, switch providers and model names, e.g.
+  # stt: { provider: livekit, model: deepgram/nova-3, language: en }
+  # llm: { provider: livekit, model: openai/gpt-4o-mini }
+  # tts: { provider: livekit, model: cartesia/sonic-3, voice: "<voice-id>" }
+  livekit:
+    url:
+    agent_name: examiner-agent
+    dispatch_mode: explicit
+    room_prefix: examiner
+    participant_prefix: user
+    metadata: {}
+
+  turn_detection:
+    provider: livekit
+    mode: turn_detector
+    preemptive_generation: true
+    endpointing: {}
+    interruption: {}
+
+  vad:
+    threshold: 0.5
+    min_silence_ms: 500
+    speech_pad_ms: 200
+    max_utterance_s: 30.0
+
+  barge_in:
+    enabled: true
+    min_speech_ms: 420
+    min_rms: 0.012
+
+  echo_tail_s: 0.7

@@ -6,8 +6,8 @@ from typing import Any
 from .agent_base import AgentBackend
 
 _REGISTRY: dict[str, type[AgentBackend] | str] = {
-    "langgraph": "src.voice.agent_langgraph:LangGraphAgent",
-    "runtime": "src.voice.agent_runtime:RuntimeAgent",
+    "langgraph": "voice.agent_langgraph:LangGraphAgent",
+    "runtime": "voice.agent_runtime:RuntimeAgent",
 }
 
 

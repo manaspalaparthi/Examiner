@@ -23,7 +23,29 @@ export interface Agent {
   timeouts?: Record<string, unknown>;
   tracing?: Record<string, unknown>;
   voiceConfig?: {
+    transport?: "legacy_ws" | "livekit";
+    livekit?: {
+      agent_name?: string;
+      agentName?: string;
+      url?: string;
+      [key: string]: unknown;
+    };
+    stt?: {
+      provider?: string;
+      model?: string;
+      model_id?: string;
+      modelId?: string;
+      language?: string;
+      [key: string]: unknown;
+    };
+    llm?: {
+      provider?: string;
+      model?: string;
+      [key: string]: unknown;
+    };
     tts?: {
+      provider?: string;
+      model?: string;
       voice?: string;
       speed?: number;
       lang?: string;

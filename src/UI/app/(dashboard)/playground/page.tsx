@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { ChatPanel, type ChatPanelHandle } from "@/components/playground/chat-panel";
+import { LiveKitVoiceControls } from "@/components/playground/livekit-voice-controls";
 import { VoiceControls } from "@/components/playground/voice-controls";
 import type { Agent } from "@/lib/types";
 
@@ -118,17 +119,31 @@ export default function PlaygroundPage() {
               )}
             </CardContent>
           </Card>
-          <VoiceControls
-            agent={agent}
-            thinkingEnabled={thinkingEnabled}
-            conversationId={conversationId}
-            onConversationIdChange={(nextConversationId) => {
-              setConversationId(nextConversationId);
-              chatRef.current?.finishVoiceAgentTurn();
-            }}
-            onUserTranscript={(text) => chatRef.current?.appendVoiceUserText(text)}
-            onAgentText={(text) => chatRef.current?.appendVoiceAgentText(text)}
-          />
+          {voiceTransport(agent) === "livekit" ? (
+            <LiveKitVoiceControls
+              agent={agent}
+              thinkingEnabled={thinkingEnabled}
+              conversationId={conversationId}
+              onConversationIdChange={(nextConversationId) => {
+                setConversationId(nextConversationId);
+                chatRef.current?.finishVoiceAgentTurn();
+              }}
+              onUserTranscript={(text) => chatRef.current?.appendVoiceUserText(text)}
+              onAgentText={(text) => chatRef.current?.appendVoiceAgentText(text)}
+            />
+          ) : (
+            <VoiceControls
+              agent={agent}
+              thinkingEnabled={thinkingEnabled}
+              conversationId={conversationId}
+              onConversationIdChange={(nextConversationId) => {
+                setConversationId(nextConversationId);
+                chatRef.current?.finishVoiceAgentTurn();
+              }}
+              onUserTranscript={(text) => chatRef.current?.appendVoiceUserText(text)}
+              onAgentText={(text) => chatRef.current?.appendVoiceAgentText(text)}
+            />
+          )}
         </div>
         <ChatPanel
           key={agent?.id ?? "no-agent"}
@@ -147,4 +162,9 @@ function agentThinkingEnabled(agent?: Agent) {
   if (typeof agent?.thinkingEnabled === "boolean") return agent.thinkingEnabled;
   if (typeof agent?.agentConfig?.thinking_enabled === "boolean") return agent.agentConfig.thinking_enabled as boolean;
   return true;
+}
+
+function voiceTransport(agent?: Agent) {
+  const transport = agent?.voiceConfig?.transport;
+  return transport === "livekit" ? "livekit" : "legacy_ws";
 }
