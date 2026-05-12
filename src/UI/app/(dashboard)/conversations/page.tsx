@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { MessagesSquare } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
@@ -16,12 +16,40 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConversationStatusBadge } from "@/components/shared/status-badge";
 import { EmptyState } from "@/components/shared/empty-state";
-import { conversations } from "@/lib/mock-data";
+import { createClient } from "@/lib/supabase/client";
+import type { Conversation } from "@/lib/types";
 import { formatDuration, formatRelativeTime } from "@/lib/utils";
 
 export default function ConversationsPage() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<string>("all");
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      const res = await fetch("/api/conversations", { cache: "no-store" });
+      const data = res.ok ? ((await res.json()) as Conversation[]) : [];
+      if (active) setConversations(data);
+    };
+    void load();
+
+    const supabase = createClient();
+    const channel = supabase
+      .channel("conversations-page")
+      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => {
+        void load();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => {
+        void load();
+      })
+      .subscribe();
+
+    return () => {
+      active = false;
+      void supabase.removeChannel(channel);
+    };
+  }, []);
 
   const rows = useMemo(() => {
     return conversations.filter((c) => {
@@ -34,7 +62,7 @@ export default function ConversationsPage() {
       }
       return true;
     });
-  }, [query, status]);
+  }, [conversations, query, status]);
 
   return (
     <>

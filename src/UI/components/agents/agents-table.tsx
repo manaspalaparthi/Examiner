@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -33,6 +33,7 @@ import {
 import { AgentStatusBadge } from "@/components/shared/status-badge";
 import { EmptyState } from "@/components/shared/empty-state";
 import { formatRelativeTime } from "@/lib/utils";
+import { createClient } from "@/lib/supabase/client";
 import type { Agent, AgentStatus } from "@/lib/types";
 
 interface AgentsTableProps {
@@ -40,8 +41,23 @@ interface AgentsTableProps {
 }
 
 export function AgentsTable({ agents }: AgentsTableProps) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<"all" | AgentStatus>("all");
+
+  useEffect(() => {
+    const supabase = createClient();
+    const channel = supabase
+      .channel("agents-table")
+      .on("postgres_changes", { event: "*", schema: "public", table: "agents" }, () => {
+        router.refresh();
+      })
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [router]);
 
   const filtered = useMemo(() => {
     return agents.filter((a) => {

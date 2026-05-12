@@ -5,7 +5,8 @@ import { PageHeader } from "@/components/shared/page-header";
 import { ConversationStatusBadge } from "@/components/shared/status-badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { conversations } from "@/lib/mock-data";
+import type { Conversation } from "@/lib/types";
+import { voiceApiUrl } from "@/lib/voice-api";
 import { formatDuration, formatRelativeTime, cn } from "@/lib/utils";
 
 interface Props {
@@ -14,7 +15,8 @@ interface Props {
 
 export default async function ConversationDetailPage({ params }: Props) {
   const { id } = await params;
-  const c = conversations.find((x) => x.id === id);
+  const res = await fetch(voiceApiUrl(`/api/conversations/${encodeURIComponent(id)}`), { cache: "no-store" });
+  const c = res.ok ? ((await res.json()) as Conversation) : null;
   if (!c) notFound();
 
   return (

@@ -177,9 +177,8 @@ you want startup to warm the defaults.
 ### Run end-to-end
 
 ```bash
-# T1 — database for src/agent
-docker compose up -d postgres
-PYTHONPATH=src python -m agent.db.migrations
+# T1 — local Supabase stack for src/agent
+docker compose --env-file supabase/.env up -d
 
 # T2 — voice service
 .venv/bin/uvicorn voice.app:app --port 8000

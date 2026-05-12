@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-import asyncpg
 import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -19,9 +18,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from agent.config import AckConfig, AgentConfig, TimeoutsConfig, TracingConfig, load_agent_config
-from agent.db.migrations import apply_pending
-from agent.db.pool import create_pool
+from agent.config import (
+    AckConfig,
+    AgentConfig,
+    BargeInConfig,
+    STTConfig,
+    TTSConfig,
+    TimeoutsConfig,
+    TracingConfig,
+    VADConfig,
+    VoiceConfig,
+    load_agent_config,
+)
+from agent.db.pool import close_pool, create_pool
+from agent.db.repo import AgentRepo, ConversationViewRepo
 from agent.events import AckEvent, DoneEvent as RuntimeDoneEvent, ErrorEvent, ThinkingDelta, TextDelta, ToolEnd, ToolStart
 from agent.errors import ConfigError
 from agent.mcp.registry import MCPRegistry
@@ -34,39 +44,6 @@ from .stt import ParakeetSTT
 from .tts import KokoroTTS
 
 log = logging.getLogger("voice.app")
-
-
-class VADConfig(BaseModel):
-    threshold: float = Field(default=0.5, ge=0.0, le=1.0)
-    min_silence_ms: int = Field(default=500, ge=0)
-    speech_pad_ms: int = Field(default=200, ge=0)
-    max_utterance_s: float = Field(default=30.0, gt=0)
-
-
-class BargeInConfig(BaseModel):
-    enabled: bool = True
-    min_speech_ms: int = Field(default=420, ge=0)
-    min_rms: float = Field(default=0.012, ge=0.0, le=1.0)
-
-
-class STTConfig(BaseModel):
-    model_id: str | None = None
-
-
-class TTSConfig(BaseModel):
-    model_path: str = "kokoro-v1.0.onnx"
-    voices_path: str = "voices-v1.0.bin"
-    voice: str = "af_heart"
-    speed: float = Field(default=1.0, gt=0.25, le=4.0)
-    lang: str = "en-us"
-
-
-class VoiceConfig(BaseModel):
-    vad: VADConfig = Field(default_factory=VADConfig)
-    barge_in: BargeInConfig = Field(default_factory=BargeInConfig)
-    stt: STTConfig = Field(default_factory=STTConfig)
-    tts: TTSConfig = Field(default_factory=TTSConfig)
-    echo_tail_s: float = Field(default=0.7, ge=0.0, le=5.0)
 
 
 class VoiceStartRequest(BaseModel):
@@ -262,7 +239,8 @@ class VoiceResourceManager:
 
 _resources = VoiceResourceManager()
 _default_voice_config = VoiceConfig()
-_db_pool: asyncpg.Pool | None = None
+_db_pool: Any | None = None
+_admin_user_id: str | None = None
 
 
 def _cors_origins_from_env() -> list[str]:
@@ -275,22 +253,23 @@ def _cors_origins_from_env() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _db_pool, _default_voice_config
+    global _admin_user_id, _db_pool, _default_voice_config
     load_dotenv()
     logging.basicConfig(
         level=os.environ.get("VOICE_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     _default_voice_config = _voice_config_from_env()
-    if os.environ.get("DATABASE_URL"):
+    if os.environ.get("SUPABASE_URL"):
         try:
             _db_pool = await create_pool()
-            await apply_pending(_db_pool)
+            _admin_user_id = await _ensure_admin_user()
             await _ensure_default_agent_record()
-            log.info("database ready")
+            log.info("supabase ready")
         except Exception as e:
             _db_pool = None
-            log.warning("database unavailable; agent CRUD endpoints will return 503: %s", e)
+            _admin_user_id = None
+            log.warning("supabase unavailable; agent CRUD endpoints will return 503: %s", e)
     if _env_bool("VOICE_PRELOAD_MODELS", default=False):
         log.info("loading default STT and TTS models; first call may take a while")
         await _resources.get_stt(_default_voice_config.stt)
@@ -300,7 +279,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         if _db_pool is not None:
-            await _db_pool.close()
+            await close_pool(_db_pool)
             _db_pool = None
 
 
@@ -398,31 +377,19 @@ async def save_runtime_config(request: RuntimeConfigSaveRequest) -> AgentConfig:
 
 @app.get("/api/agents", response_model=list[AgentRecord])
 async def list_agents() -> list[AgentRecord]:
-    pool = _require_db()
-    rows = await pool.fetch(
-        """
-        SELECT * FROM agents
-        ORDER BY
-          CASE status
-            WHEN 'active' THEN 0
-            WHEN 'draft' THEN 1
-            ELSE 2
-          END,
-          updated_at DESC,
-          name ASC
-        """
-    )
+    repo = AgentRepo(_require_db())
+    rows = await repo.list()
     return [_agent_from_row(row) for row in rows]
 
 
 @app.post("/api/agents", response_model=AgentRecord, status_code=201)
 async def create_agent(request: AgentCreateRequest) -> AgentRecord:
-    pool = _require_db()
+    repo = AgentRepo(_require_db())
     if not request.name.strip():
         raise HTTPException(status_code=400, detail="name is required")
     agent_id = request.id or _slugify_agent_id(request.name)
     provider = request.provider or _infer_provider(request.model)
-    model = request.model or os.environ.get("MODEL_NAME") or "gemma-4-31b-it"
+    model = request.model or os.environ.get("MODEL_NAME") or "gemini-2.5-flash"
     ack = request.ack or AckConfig().model_dump(mode="json")
     timeouts = request.timeouts or TimeoutsConfig().model_dump(mode="json")
     tracing = request.tracing or TracingConfig().model_dump(mode="json")
@@ -441,57 +408,42 @@ async def create_agent(request: AgentCreateRequest) -> AgentRecord:
         "timeouts": timeouts,
         "tracing": tracing,
     }
+    payload = {
+        "id": agent_id,
+        "user_id": _owner_user_id(request.user_id),
+        "name": request.name.strip(),
+        "description": request.description,
+        "status": request.status,
+        "backend_agent": request.backend_agent,
+        "config_path": request.config_path,
+        "voice_id": request.voice_id,
+        "provider": provider,
+        "model": model,
+        "system_prompt": request.system_prompt,
+        "temperature": request.temperature,
+        "max_tokens": request.max_tokens,
+        "history_limit": request.history_limit,
+        "tools": request.tools,
+        "tool_groups": request.tool_groups,
+        "ack": ack,
+        "mcp_servers": request.mcp_servers,
+        "timeouts": timeouts,
+        "tracing": tracing,
+        "voice_config": voice_config,
+        "agent_config": agent_config,
+        "start_params": request.start_params,
+        "metadata": request.metadata,
+    }
     try:
-        row = await pool.fetchrow(
-            """
-            INSERT INTO agents (
-              id, user_id, name, description, status, backend_agent, config_path, voice_id,
-              provider, model, system_prompt, temperature, max_tokens, history_limit,
-              tools, tool_groups, ack, mcp_servers, timeouts, tracing, voice_config,
-              agent_config, start_params, metadata
-            )
-            VALUES (
-              $1, $2, $3, $4, $5, $6, $7, $8,
-              $9, $10, $11, $12, $13, $14,
-              $15, $16, $17::jsonb, $18::jsonb, $19::jsonb, $20::jsonb, $21::jsonb,
-              $22::jsonb, $23::jsonb, $24::jsonb
-            )
-            RETURNING *
-            """,
-            agent_id,
-            request.user_id,
-            request.name.strip(),
-            request.description,
-            request.status,
-            request.backend_agent,
-            request.config_path,
-            request.voice_id,
-            provider,
-            model,
-            request.system_prompt,
-            request.temperature,
-            request.max_tokens,
-            request.history_limit,
-            request.tools,
-            request.tool_groups,
-            _dump_jsonb(ack),
-            _dump_jsonb(request.mcp_servers),
-            _dump_jsonb(timeouts),
-            _dump_jsonb(tracing),
-            _dump_jsonb(voice_config),
-            _dump_jsonb(agent_config),
-            _dump_jsonb(request.start_params),
-            _dump_jsonb(request.metadata),
-        )
-    except asyncpg.UniqueViolationError as e:
+        row = await repo.create(payload)
+    except Exception as e:
         raise HTTPException(status_code=409, detail=f"Agent {agent_id!r} already exists") from e
     return _agent_from_row(row)
 
 
 @app.get("/api/agents/{agent_id}", response_model=AgentRecord)
 async def get_agent(agent_id: str) -> AgentRecord:
-    pool = _require_db()
-    row = await pool.fetchrow("SELECT * FROM agents WHERE id = $1", agent_id)
+    row = await AgentRepo(_require_db()).get(agent_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return _agent_from_row(row)
@@ -500,7 +452,7 @@ async def get_agent(agent_id: str) -> AgentRecord:
 @app.post("/api/agents/{agent_id}/chat", response_model=AgentChatResponse)
 async def chat_with_agent(agent_id: str, request: AgentChatRequest) -> AgentChatResponse:
     pool = _require_db()
-    row = await pool.fetchrow("SELECT * FROM agents WHERE id = $1", agent_id)
+    row = await AgentRepo(pool).get(agent_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -558,7 +510,7 @@ async def chat_with_agent(agent_id: str, request: AgentChatRequest) -> AgentChat
 @app.post("/api/agents/{agent_id}/chat/stream")
 async def stream_chat_with_agent(agent_id: str, request: AgentChatRequest) -> StreamingResponse:
     pool = _require_db()
-    row = await pool.fetchrow("SELECT * FROM agents WHERE id = $1", agent_id)
+    row = await AgentRepo(pool).get(agent_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -615,8 +567,8 @@ async def stream_chat_with_agent(agent_id: str, request: AgentChatRequest) -> St
 
 @app.patch("/api/agents/{agent_id}", response_model=AgentRecord)
 async def update_agent(agent_id: str, request: AgentUpdateRequest) -> AgentRecord:
-    pool = _require_db()
-    current = await pool.fetchrow("SELECT * FROM agents WHERE id = $1", agent_id)
+    repo = AgentRepo(_require_db())
+    current = await repo.get(agent_id)
     if current is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -649,69 +601,60 @@ async def update_agent(agent_id: str, request: AgentUpdateRequest) -> AgentRecor
         "tracing": tracing,
     }
 
-    row = await pool.fetchrow(
-        """
-        UPDATE agents SET
-          name = $2,
-          user_id = $3,
-          description = $4,
-          status = $5,
-          backend_agent = $6,
-          config_path = $7,
-          voice_id = $8,
-          provider = $9,
-          model = $10,
-          system_prompt = $11,
-          temperature = $12,
-          max_tokens = $13,
-          history_limit = $14,
-          tools = $15,
-          tool_groups = $16,
-          ack = $17::jsonb,
-          mcp_servers = $18::jsonb,
-          timeouts = $19::jsonb,
-          tracing = $20::jsonb,
-          voice_config = $21::jsonb,
-          agent_config = $22::jsonb,
-          start_params = $23::jsonb,
-          metadata = $24::jsonb
-        WHERE id = $1
-        RETURNING *
-        """,
+    row = await repo.update(
         agent_id,
-        update.get("name", current_agent.name),
-        update.get("user_id", current_agent.user_id),
-        update.get("description", current_agent.description),
-        update.get("status", current_agent.status),
-        update.get("backend_agent", current_agent.backend_agent),
-        update.get("config_path", current_agent.config_path),
-        update.get("voice_id", current_agent.voice_id),
-        provider,
-        model,
-        system_prompt,
-        temperature,
-        max_tokens,
-        history_limit,
-        update.get("tools", current_agent.tools),
-        tool_groups,
-        _dump_jsonb(ack),
-        _dump_jsonb(mcp_servers),
-        _dump_jsonb(timeouts),
-        _dump_jsonb(tracing),
-        _dump_jsonb(update.get("voice_config", current_agent.voice_config)),
-        _dump_jsonb(agent_config),
-        _dump_jsonb(update.get("start_params", current_agent.start_params)),
-        _dump_jsonb(update.get("metadata", current_agent.metadata)),
+        {
+            "name": update.get("name", current_agent.name),
+            "user_id": _owner_user_id(update.get("user_id", current_agent.user_id)),
+            "description": update.get("description", current_agent.description),
+            "status": update.get("status", current_agent.status),
+            "backend_agent": update.get("backend_agent", current_agent.backend_agent),
+            "config_path": update.get("config_path", current_agent.config_path),
+            "voice_id": update.get("voice_id", current_agent.voice_id),
+            "provider": provider,
+            "model": model,
+            "system_prompt": system_prompt,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "history_limit": history_limit,
+            "tools": update.get("tools", current_agent.tools),
+            "tool_groups": tool_groups,
+            "ack": ack,
+            "mcp_servers": mcp_servers,
+            "timeouts": timeouts,
+            "tracing": tracing,
+            "voice_config": update.get("voice_config", current_agent.voice_config),
+            "agent_config": agent_config,
+            "start_params": update.get("start_params", current_agent.start_params),
+            "metadata": update.get("metadata", current_agent.metadata),
+        },
     )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
     return _agent_from_row(row)
 
 
 @app.delete("/api/agents/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str) -> None:
-    pool = _require_db()
-    result = await pool.execute("DELETE FROM agents WHERE id = $1", agent_id)
-    if result == "DELETE 0":
+    deleted = await AgentRepo(_require_db()).delete(agent_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Agent not found")
+
+
+@app.get("/api/conversations")
+async def list_conversations(
+    agent_id: str | None = Query(default=None, alias="agentId"),
+    status: str | None = Query(default=None),
+) -> list[dict[str, Any]]:
+    return await ConversationViewRepo(_require_db()).list(agent_id=agent_id, status=status)
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(conversation_id: UUID) -> dict[str, Any]:
+    row = await ConversationViewRepo(_require_db()).get(conversation_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return row
 
 
 @app.websocket("/ws/voice")
@@ -770,19 +713,61 @@ async def ws_voice(ws: WebSocket) -> None:
             pass
 
 
-def _require_db() -> asyncpg.Pool:
+def _require_db() -> Any:
     if _db_pool is None:
         raise HTTPException(
             status_code=503,
-            detail="Database is not available. Set DATABASE_URL and start Postgres.",
+            detail="Supabase is not available. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.",
         )
     return _db_pool
+
+
+async def _ensure_admin_user() -> str:
+    if _db_pool is None:
+        raise RuntimeError("Supabase client is not initialized")
+    email = os.environ.get("SUPABASE_ADMIN_EMAIL", "admin@example.com")
+    password = os.environ.get("SUPABASE_ADMIN_PASSWORD", "admin")
+    name = os.environ.get("SUPABASE_ADMIN_NAME", "Admin")
+
+    def find_existing() -> str | None:
+        users = _db_pool.auth.admin.list_users()
+        for user in getattr(users, "users", users):
+            if getattr(user, "email", None) == email:
+                return str(user.id)
+        return None
+
+    import asyncio
+
+    existing = await asyncio.to_thread(find_existing)
+    if existing:
+        return existing
+
+    def create() -> str:
+        result = _db_pool.auth.admin.create_user(
+            {
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "user_metadata": {"name": name},
+            }
+        )
+        user = getattr(result, "user", result)
+        return str(user.id)
+
+    try:
+        return await asyncio.to_thread(create)
+    except Exception:
+        existing = await asyncio.to_thread(find_existing)
+        if existing:
+            return existing
+        raise
 
 
 async def _ensure_default_agent_record() -> None:
     if _db_pool is None:
         return
-    existing = await _db_pool.fetchval("SELECT COUNT(*) FROM agents")
+    repo = AgentRepo(_db_pool)
+    existing = await repo.count()
     if existing:
         return
     config_path = os.environ.get("AGENT_CONFIG", "config/agent.yaml")
@@ -792,45 +777,53 @@ async def _ensure_default_agent_record() -> None:
         log.warning("skipping default agent seed: %s", e)
         return
     voice_config = _default_voice_config.model_dump(mode="json")
-    await _db_pool.execute(
-        """
-        INSERT INTO agents (
-          id, user_id, name, description, status, backend_agent, config_path, voice_id,
-          provider, model, system_prompt, temperature, max_tokens, history_limit,
-          tools, tool_groups, ack, mcp_servers, timeouts, tracing, voice_config,
-          agent_config, start_params, metadata
-        )
-        VALUES (
-          $1, 'admin', $2, $3, 'active', 'runtime', $4, $5,
-          $6, $7, $8, $9, $10, $11,
-          ARRAY[]::TEXT[], $12, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb, $17::jsonb,
-          $18::jsonb, '{}'::jsonb, $19::jsonb
-        )
-        ON CONFLICT (id) DO NOTHING
-        """,
-        cfg.agent_id,
-        _humanize_agent_id(cfg.agent_id),
-        "Runtime voice agent loaded from config/agent.yaml.",
-        config_path,
-        voice_config["tts"]["voice"],
-        cfg.provider,
-        cfg.model,
-        cfg.system_prompt,
-        cfg.temperature,
-        cfg.max_tokens,
-        cfg.history_limit,
-        cfg.tool_groups,
-        _dump_jsonb(cfg.ack.model_dump(mode="json")),
-        _dump_jsonb([server.model_dump(mode="json") for server in cfg.mcp_servers]),
-        _dump_jsonb(cfg.timeouts.model_dump(mode="json")),
-        _dump_jsonb(cfg.tracing.model_dump(mode="json")),
-        _dump_jsonb(voice_config),
-        _dump_jsonb(cfg.model_dump(mode="json")),
-        _dump_jsonb({"seeded_from": config_path}),
+    await repo.create(
+        {
+            "id": cfg.agent_id,
+            "user_id": _owner_user_id(None),
+            "name": _humanize_agent_id(cfg.agent_id),
+            "description": "Runtime voice agent loaded from config/agent.yaml.",
+            "status": "active",
+            "backend_agent": "runtime",
+            "config_path": config_path,
+            "voice_id": voice_config["tts"]["voice"],
+            "provider": cfg.provider,
+            "model": cfg.model,
+            "system_prompt": cfg.system_prompt,
+            "temperature": cfg.temperature,
+            "max_tokens": cfg.max_tokens,
+            "history_limit": cfg.history_limit,
+            "tools": [],
+            "tool_groups": cfg.tool_groups,
+            "ack": cfg.ack.model_dump(mode="json"),
+            "mcp_servers": [server.model_dump(mode="json") for server in cfg.mcp_servers],
+            "timeouts": cfg.timeouts.model_dump(mode="json"),
+            "tracing": cfg.tracing.model_dump(mode="json"),
+            "voice_config": voice_config,
+            "agent_config": cfg.model_dump(mode="json"),
+            "start_params": {},
+            "metadata": {"seeded_from": config_path},
+        }
     )
 
 
-def _agent_from_row(row: asyncpg.Record) -> AgentRecord:
+def _owner_user_id(value: str | None) -> str:
+    if value and _looks_uuid(value):
+        return value
+    if _admin_user_id:
+        return _admin_user_id
+    raise HTTPException(status_code=503, detail="Supabase admin user is not ready")
+
+
+def _looks_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _agent_from_row(row: dict[str, Any]) -> AgentRecord:
     return AgentRecord.model_validate(
         {
             "id": row["id"],
@@ -963,23 +956,48 @@ def _validate_agent_name(name: str) -> None:
 
 
 def _voice_config_from_env() -> VoiceConfig:
-    return VoiceConfig(
-        stt=STTConfig(model_id=os.environ.get("PARAKEET_MODEL")),
-        tts=TTSConfig(
-            model_path=os.environ.get("KOKORO_MODEL", "kokoro-v1.0.onnx"),
-            voices_path=os.environ.get("KOKORO_VOICES", "voices-v1.0.bin"),
-            voice=os.environ.get("KOKORO_VOICE", "af_heart"),
-            speed=float(os.environ.get("KOKORO_SPEED", "1.0")),
-            lang=os.environ.get("KOKORO_LANG", "en-us"),
-        ),
-        vad=VADConfig(
-            threshold=float(os.environ.get("VAD_THRESHOLD", "0.5")),
-            min_silence_ms=int(os.environ.get("VAD_MIN_SILENCE_MS", "500")),
-            speech_pad_ms=int(os.environ.get("VAD_SPEECH_PAD_MS", "200")),
-            max_utterance_s=float(os.environ.get("VAD_MAX_UTTERANCE_S", "30.0")),
-        ),
-        echo_tail_s=float(os.environ.get("VOICE_ECHO_TAIL_S", "0.7")),
-    )
+    try:
+        base = load_agent_config().voice
+    except Exception as e:
+        log.warning("falling back to default voice config: %s", e)
+        base = VoiceConfig()
+
+    data = base.model_dump(mode="json")
+    if os.environ.get("VOICE_TRANSPORT"):
+        data["transport"] = os.environ["VOICE_TRANSPORT"]
+    if os.environ.get("PARAKEET_MODEL"):
+        data.setdefault("stt", {})["model_id"] = os.environ["PARAKEET_MODEL"]
+        data["stt"]["provider"] = "local"
+    if os.environ.get("KOKORO_MODEL"):
+        data.setdefault("tts", {})["model_path"] = os.environ["KOKORO_MODEL"]
+        data["tts"]["provider"] = "local"
+    if os.environ.get("KOKORO_VOICES"):
+        data.setdefault("tts", {})["voices_path"] = os.environ["KOKORO_VOICES"]
+        data["tts"]["provider"] = "local"
+    if os.environ.get("KOKORO_VOICE"):
+        data.setdefault("tts", {})["voice"] = os.environ["KOKORO_VOICE"]
+        data["tts"]["provider"] = "local"
+    if os.environ.get("KOKORO_SPEED"):
+        data.setdefault("tts", {})["speed"] = float(os.environ["KOKORO_SPEED"])
+        data["tts"]["provider"] = "local"
+    if os.environ.get("KOKORO_LANG"):
+        data.setdefault("tts", {})["lang"] = os.environ["KOKORO_LANG"]
+        data["tts"]["provider"] = "local"
+    if os.environ.get("VAD_THRESHOLD"):
+        data.setdefault("vad", {})["threshold"] = float(os.environ["VAD_THRESHOLD"])
+    if os.environ.get("VAD_MIN_SILENCE_MS"):
+        data.setdefault("vad", {})["min_silence_ms"] = int(os.environ["VAD_MIN_SILENCE_MS"])
+    if os.environ.get("VAD_SPEECH_PAD_MS"):
+        data.setdefault("vad", {})["speech_pad_ms"] = int(os.environ["VAD_SPEECH_PAD_MS"])
+    if os.environ.get("VAD_MAX_UTTERANCE_S"):
+        data.setdefault("vad", {})["max_utterance_s"] = float(os.environ["VAD_MAX_UTTERANCE_S"])
+    if os.environ.get("VOICE_ECHO_TAIL_S"):
+        data["echo_tail_s"] = float(os.environ["VOICE_ECHO_TAIL_S"])
+    if os.environ.get("LIVEKIT_URL"):
+        data.setdefault("livekit", {})["url"] = os.environ["LIVEKIT_URL"]
+    if os.environ.get("LIVEKIT_AGENT_NAME"):
+        data.setdefault("livekit", {})["agent_name"] = os.environ["LIVEKIT_AGENT_NAME"]
+    return VoiceConfig.model_validate(data)
 
 
 def _safe_config_path(path: str | None) -> Path:

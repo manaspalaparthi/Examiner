@@ -95,7 +95,9 @@ class RuntimeAgent(AgentBackend):
             await self._llm.aclose()
             self._llm = None
         if self._pool is not None:
-            await self._pool.close()
+            from agent.db.pool import close_pool
+
+            await close_pool(self._pool)
             self._pool = None
         self._runtime = None
 

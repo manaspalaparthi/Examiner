@@ -5,11 +5,8 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import UUID
-
-if TYPE_CHECKING:
-    import asyncpg
 
 from .ack import AckPicker
 from .config import AgentConfig
@@ -56,7 +53,7 @@ class AgentRuntime:
         self,
         *,
         cfg: AgentConfig,
-        pool: asyncpg.Pool,
+        pool: Any,
         llm: LLMClient,
         tools: ToolRegistry,
     ) -> None:
@@ -164,7 +161,7 @@ class AgentRuntime:
                     continue
                 yield ev
         except ProviderError as e:
-            log.exception("runtime: provider error")
+            log.warning("runtime: provider error: %s", e)
             await self._msgs.append(
                 conversation_id=conv.id,
                 role="assistant",

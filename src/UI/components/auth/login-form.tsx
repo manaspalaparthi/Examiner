@@ -20,14 +20,14 @@ export function LoginForm() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        username: String(formData.get("username") ?? ""),
+        email: String(formData.get("email") ?? ""),
         password: String(formData.get("password") ?? ""),
       }),
     });
 
     if (!res.ok) {
-      setError("Invalid username or password.");
-      toast.error("Invalid username or password.");
+      setError("Invalid email or password.");
+      toast.error("Invalid email or password.");
       return;
     }
 
@@ -39,13 +39,20 @@ export function LoginForm() {
     <Card className="w-full max-w-sm rounded-lg">
       <CardHeader>
         <CardTitle>Sign in</CardTitle>
-        <CardDescription>Use your Examiner admin account.</CardDescription>
+        <CardDescription>Use your Examiner Supabase account.</CardDescription>
       </CardHeader>
       <CardContent>
         <form action={(fd) => startTransition(() => void handleSubmit(fd))} className="grid gap-4">
           <div className="grid gap-2">
-            <Label htmlFor="username">Username</Label>
-            <Input id="username" name="username" autoComplete="username" defaultValue="admin" required />
+            <Label htmlFor="email">Email</Label>
+            <Input
+              id="email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              defaultValue="admin@example.com"
+              required
+            />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="password">Password</Label>

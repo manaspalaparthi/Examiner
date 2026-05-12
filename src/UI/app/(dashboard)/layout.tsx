@@ -1,12 +1,11 @@
-import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { AppHeader } from "@/components/layout/app-header";
 import { AppSidebar } from "@/components/layout/app-sidebar";
-import { AUTH_COOKIE, isValidSession } from "@/lib/auth";
+import { getUser } from "@/lib/supabase/server";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const session = (await cookies()).get(AUTH_COOKIE)?.value;
-  if (!isValidSession(session)) {
+  const user = await getUser();
+  if (!user) {
     redirect("/login");
   }
 

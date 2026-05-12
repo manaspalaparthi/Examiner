@@ -4,6 +4,6 @@ Public entry points:
     from agent.runtime import AgentRuntime
     from agent.events import AckEvent, TextDelta, ThinkingDelta, ToolStart, ToolEnd, DoneEvent, ErrorEvent
 
-Submodules are imported explicitly so heavy dependencies (asyncpg, httpx,
+Submodules are imported explicitly so heavy dependencies (Supabase, httpx,
 provider SDKs) are only loaded by callers that actually use them.
 """
